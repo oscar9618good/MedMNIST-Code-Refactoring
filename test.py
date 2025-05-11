@@ -33,7 +33,7 @@ def test_model(model, test_loader, device, task_type):
 
 def main():
     parser = argparse.ArgumentParser(description="MedMNIST 2D 資料集測試腳本")
-    parser.add_argument('--data_flag', type=str, default='pneumoniamnist',
+    parser.add_argument('--data_flag', type=str, default='chestmnist',
                         help=f"MedMNIST 資料集標籤 (僅限 28x28)。可選: {', '.join(SUPPORTED_2D_DATASETS)}")
     parser.add_argument('--model_path_root', type=str, default='./trained_models',
                         help="已儲存模型權重的根目錄")
