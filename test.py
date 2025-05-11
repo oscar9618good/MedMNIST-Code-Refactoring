@@ -9,29 +9,23 @@ from data_utils import get_data_loader, SUPPORTED_2D_DATASETS
 from model import SimpleCNN
 from utils import load_model
 
-
 def test_model(model, test_loader, device, task_type):
     model.eval()
-    # y_true_test 和 y_score_test 在迴圈內部處理
     all_labels_list = []
     all_scores_list = []
 
     with torch.no_grad():
         for inputs, labels in tqdm(test_loader, desc="測試中"):
-            inputs_on_device = inputs.to(device) # labels 不立即移到 device，因為我們需要原始的 labels for all_labels_list
-            
+            inputs_on_device = inputs.to(device)
             outputs = model(inputs_on_device) # logits
 
-            # 根據任務類型獲取用於指標計算的分數
+            scores_for_metric = outputs.detach() # 預設為 logits
             if task_type == 'multi-label, binary-class':
-                scores_for_metric = torch.sigmoid(outputs).detach()
-            else: # binary-class 和 multi-class
-                scores_for_metric = outputs.detach()
-
+                scores_for_metric = torch.sigmoid(outputs).detach() # 多標籤用 sigmoid 機率
+            
             all_labels_list.append(labels.cpu()) # 收集原始標籤 (CPU)
             all_scores_list.append(scores_for_metric.cpu()) # 收集模型輸出分數 (CPU)
             
-    # 在函數末尾將列表中的 tensors 合併並轉換為 numpy arrays
     final_y_true = torch.cat(all_labels_list, dim=0).numpy()
     final_y_score = torch.cat(all_scores_list, dim=0).numpy()
 
@@ -60,19 +54,20 @@ def main():
     
     n_channels = info['n_channels']
     task = info['task']
+    n_classes = 0
 
     if task == "multi-label, binary-class":
         n_classes = len(info['label'])
-    elif 'multi-class' in task:
-        n_classes = len(info['label'])
-    elif 'binary-class' in task:
+    elif task == "binary-class":
         n_classes = 2
+    elif task == "multi-class" or task == "ordinal-regression":
+        n_classes = len(info['label'])
     else:
-        raise ValueError(f"未知的任務類型: {task}")
+        raise ValueError(f"未知的或不支援的任務類型: {task} for data_flag {args.data_flag}")
 
     print(f"資料集資訊: 通道數={n_channels}, 類別數={n_classes}, 任務類型={task}")
 
-    model = SimpleCNN(in_channels=n_channels, num_classes=n_classes) # 初始化模型結構
+    model = SimpleCNN(in_channels=n_channels, num_classes=n_classes)
     
     try:
         model = load_model(model, model_full_path_dir, args.model_filename, device)
@@ -82,66 +77,63 @@ def main():
         print("你可以先執行 train.py 來訓練並儲存一個模型。")
         return
     
-    
-    # 測試模型，獲取真實標籤和模型分數 (numpy arrays)
+    # model.to(device) # load_model 內部已經將模型移至 device
+
     test_y_true_np, test_y_score_np = test_model(model, test_loader, device, task)
     
-    # --- 開始使用 scikit-learn 計算指標 ---
     auc_value = 0.0
     acc_value = 0.0
 
-    # 1. 準備 y_true 給 scikit-learn (通常是 1D array)
-    test_y_true_sklearn = test_y_true_np.squeeze()
+    y_true_sklearn = test_y_true_np.squeeze()
+
+    print_messages = [f"測試結果 ({args.data_flag}):"]
 
     if task == "binary-class":
-        # test_y_score_np 是 (N, 2) 的 logits
-        y_score_logits_tensor = torch.from_numpy(test_y_score_np) # 不需要 .to(device)
+        y_score_logits_tensor = torch.from_numpy(test_y_score_np)
         y_score_probs = torch.softmax(y_score_logits_tensor, dim=1)
         y_score_positive_class_probs_np = y_score_probs[:, 1].numpy()
         try:
-            auc_value = roc_auc_score(test_y_true_sklearn, y_score_positive_class_probs_np)
+            auc_value = roc_auc_score(y_true_sklearn, y_score_positive_class_probs_np)
         except ValueError as e:
             print(f"警告：計算 AUC 時出錯 ({e})。可能是所有樣本都屬於同一類別。將 AUC 設為 0.5。")
             auc_value = 0.5
         
         predicted_labels_np = np.argmax(test_y_score_np, axis=1)
-        acc_value = accuracy_score(test_y_true_sklearn, predicted_labels_np)
+        acc_value = accuracy_score(y_true_sklearn, predicted_labels_np)
         
-        print(f"測試結果 ({args.data_flag}):")
-        print(f"  AUC: {auc_value:.4f}")
-        print(f"  Accuracy: {acc_value:.4f}")
+        print_messages.append(f"  AUC: {auc_value:.4f}")
+        print_messages.append(f"  Accuracy: {acc_value:.4f}")
 
     elif task == "multi-label, binary-class":
-        # test_y_score_np 是 (N, num_labels) 的 sigmoid 機率
         try:
-            auc_value = roc_auc_score(test_y_true_sklearn, test_y_score_np, average='macro')
+            auc_value = roc_auc_score(y_true_sklearn, test_y_score_np, average='macro')
         except ValueError as e:
             print(f"警告：計算多標籤 AUC 時出錯 ({e})。將 AUC 設為 0.5。")
             auc_value = 0.5
         
         predicted_labels_np = (test_y_score_np > 0.5).astype(int)
-        acc_value = accuracy_score(test_y_true_sklearn, predicted_labels_np) # Subset accuracy
+        acc_value = accuracy_score(y_true_sklearn, predicted_labels_np) # Subset accuracy
         
-        print(f"測試結果 ({args.data_flag}):")
-        print(f"  AUC (Macro): {auc_value:.4f}")
-        print(f"  Accuracy (Subset): {acc_value:.4f}") # 註明是子集準確率
+        print_messages.append(f"  AUC (Macro): {auc_value:.4f}")
+        print_messages.append(f"  Accuracy (Subset): {acc_value:.4f}")
 
-    else: # multi-class
+    else: # multi-class or ordinal-regression
         predicted_labels_np = np.argmax(test_y_score_np, axis=1)
-        acc_value = accuracy_score(test_y_true_sklearn, predicted_labels_np)
+        acc_value = accuracy_score(y_true_sklearn, predicted_labels_np)
         
         y_score_logits_tensor = torch.from_numpy(test_y_score_np)
         y_score_probs_np = torch.softmax(y_score_logits_tensor, dim=1).numpy()
         try:
-            auc_value = roc_auc_score(test_y_true_sklearn, y_score_probs_np, multi_class='ovr', average='macro')
+            auc_value = roc_auc_score(y_true_sklearn, y_score_probs_np, multi_class='ovr', average='macro')
         except ValueError as e:
             print(f"警告：計算多類別 AUC 時出錯 ({e})。將 AUC 設為 0.0。")
             auc_value = 0.0
             
-        print(f"測試結果 ({args.data_flag}):")
-        print(f"  Accuracy: {acc_value:.4f}")
-        print(f"  AUC (Macro OvR): {auc_value:.4f}")
-    # --- 指標計算結束 ---
+        print_messages.append(f"  Accuracy: {acc_value:.4f}")
+        print_messages.append(f"  AUC (Macro OvR): {auc_value:.4f}")
+    
+    for msg in print_messages:
+        print(msg)
 
     print("測試完成。")
 
